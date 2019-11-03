@@ -314,7 +314,7 @@ int pslab_pre_recover(char *name, uint32_t *slab_sizes, int slab_max,
 
 bool pslab_force;
 
-int pslab_create(char *pool_name, uint32_t pool_size, uint32_t slab_page_size,
+int pslab_create(char *pool_name, size_t pool_size, uint32_t slab_page_size,
         uint32_t *slabclass_sizes, int slabclass_num) {
 
     size_t mapped_len;
