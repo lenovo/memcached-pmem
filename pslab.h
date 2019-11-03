@@ -21,7 +21,7 @@
 #define pslab_item_data_persist(it) pmem_persist((it)->data, ITEM_dtotal(it)
 #define pslab_item_data_flush(it) pmem_flush((it)->data, ITEM_dtotal(it))
 
-int pslab_create(char *pool_name, uint32_t pool_size, uint32_t slab_size,
+int pslab_create(char *pool_name, size_t pool_size, uint32_t slab_size,
     uint32_t *slabclass_sizes, int slabclass_num);
 int pslab_pre_recover(char *name, uint32_t *slab_sizes, int slab_max, int slab_page_size);
 int pslab_do_recover(void);
