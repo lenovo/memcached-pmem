@@ -196,17 +196,17 @@ int pslab_do_recover() {
         for (i = 0, ptr = fp->slab; i < perslab; i++, ptr += size) {
             item *it = (item *) ptr;
 
-            if (it->it_flags & ITEM_LINKED) {
+            if (atomic_load(&it->it_flags) & ITEM_LINKED) {
                 if (item_is_flushed(it) ||
                         (it->exptime != 0 && it->exptime <= current_time)) {
-                    it->it_flags = ITEM_PSLAB;
+                    atomic_store(&it->it_flags, ITEM_PSLAB);
                     pmem_member_persist(it, it_flags);
                 } else {
                     fp->flags |= PSLAB_LINKED;
-                    if (it->it_flags & ITEM_CHUNKED)
+                    if (atomic_load(&it->it_flags) & ITEM_CHUNKED)
                         fp->flags |= PSLAB_CHUNKED;
                 }
-            } else if (it->it_flags & ITEM_CHUNK) {
+            } else if (atomic_load(&it->it_flags) & ITEM_CHUNK) {
                 ((item_chunk *)it)->head = NULL; /* non-persistent */
             }
         }
@@ -222,7 +222,7 @@ int pslab_do_recover() {
         for (i = 0, ptr = fp->slab; i < perslab; i++, ptr += size) {
             item *it = (item *) ptr;
 
-            if ((it->it_flags & ITEM_LINKED) && (it->it_flags & ITEM_CHUNKED)) {
+            if ((atomic_load(&it->it_flags) & ITEM_LINKED) && (atomic_load(&it->it_flags) & ITEM_CHUNKED)) {
                 item_chunk *nch;
                 item_chunk *ch = (item_chunk *) ITEM_data(it);
                 ch->head = it;
@@ -254,12 +254,12 @@ int pslab_do_recover() {
         perslab = pslab_pool->slab_page_size / size;
         for (i = 0, ptr = fp->slab; i < perslab; i++, ptr += size) {
             item *it = (item *) ptr;
-            if (it->it_flags & ITEM_LINKED) {
+            if (atomic_load(&it->it_flags) & ITEM_LINKED) {
                 do_slab_realloc(it, id);
                 do_item_relink(it, hash(ITEM_key(it), it->nkey));
-            } else if ((it->it_flags & ITEM_CHUNK) == 0 ||
+            } else if ((atomic_load(&it->it_flags) & ITEM_CHUNK) == 0 ||
                     ((item_chunk *)it)->head == NULL) {
-                assert((it->it_flags & ITEM_CHUNKED) == 0);
+                assert((atomic_load(&it->it_flags) & ITEM_CHUNKED) == 0);
                 do_slabs_free(ptr, 0, id);
             }
         }

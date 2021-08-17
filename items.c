@@ -307,7 +307,7 @@ item *do_item_alloc(char *key, const size_t nkey, const unsigned int flags,
         it = do_item_alloc_pull(htotal, hdr_id);
         /* setting ITEM_CHUNKED is fine here because we aren't LINKED yet. */
         if (it != NULL)
-            it->it_flags |= ITEM_CHUNKED;
+            atomic_store(&it->it_flags, atomic_load(&it->it_flags) | ITEM_CHUNKED);
     } else {
         it = do_item_alloc_pull(ntotal, id);
     }
@@ -340,7 +340,7 @@ item *do_item_alloc(char *key, const size_t nkey, const unsigned int flags,
     it->slabs_clsid = id;
 
     DEBUG_REFCNT(it, '*');
-    it->it_flags |= settings.use_cas ? ITEM_CAS : 0;
+    atomic_store(&it->it_flags, atomic_load(&it->it_flags) | settings.use_cas ? ITEM_CAS : 0);
     it->nkey = nkey;
     it->nbytes = nbytes;
     memcpy(ITEM_key(it), key, nkey);
@@ -353,7 +353,7 @@ item *do_item_alloc(char *key, const size_t nkey, const unsigned int flags,
     it->nsuffix = nsuffix;
 
     /* Initialize internal chunk. */
-    if (it->it_flags & ITEM_CHUNKED) {
+    if (atomic_load(&it->it_flags) & ITEM_CHUNKED) {
         item_chunk *chunk = (item_chunk *) ITEM_data(it);
 
         chunk->next = 0;
@@ -364,13 +364,13 @@ item *do_item_alloc(char *key, const size_t nkey, const unsigned int flags,
         chunk->orig_clsid = hdr_id;
 #ifdef PSLAB
         chunk->next_poff = 0;
-        if (it->it_flags & ITEM_PSLAB)
+        if (atomic_load(&it->it_flags) & ITEM_PSLAB)
             pmem_member_flush(chunk, next_poff);
 #endif
     }
     it->h_next = 0;
 #ifdef PSLAB
-    if (it->it_flags & ITEM_PSLAB)
+    if (atomic_load(&it->it_flags) & ITEM_PSLAB)
         pmem_flush_from(it, item, time);
 #endif
 
@@ -380,7 +380,7 @@ item *do_item_alloc(char *key, const size_t nkey, const unsigned int flags,
 void item_free(item *it) {
     size_t ntotal = ITEM_ntotal(it);
     unsigned int clsid;
-    assert((it->it_flags & ITEM_LINKED) == 0);
+    assert((atomic_load(&it->it_flags) & ITEM_LINKED) == 0);
     assert(it != heads[it->slabs_clsid]);
     assert(it != tails[it->slabs_clsid]);
     assert(it->refcount == 0);
@@ -425,7 +425,7 @@ static void do_item_link_q(item *it) { /* item is the new head */
     if (*tail == 0) *tail = it;
     sizes[it->slabs_clsid]++;
 #ifdef EXTSTORE
-    if (it->it_flags & ITEM_HDR) {
+    if (atomic_load(&it->it_flags) & ITEM_HDR) {
         sizes_bytes[it->slabs_clsid] += (ITEM_ntotal(it) - it->nbytes) + sizeof(item_hdr);
     } else {
         sizes_bytes[it->slabs_clsid] += ITEM_ntotal(it);
@@ -470,7 +470,7 @@ static void do_item_unlink_q(item *it) {
     if (it->prev) it->prev->next = it->next;
     sizes[it->slabs_clsid]--;
 #ifdef EXTSTORE
-    if (it->it_flags & ITEM_HDR) {
+    if (atomic_load(&it->it_flags) & ITEM_HDR) {
         sizes_bytes[it->slabs_clsid] -= (ITEM_ntotal(it) - it->nbytes) + sizeof(item_hdr);
     } else {
         sizes_bytes[it->slabs_clsid] -= ITEM_ntotal(it);
@@ -509,20 +509,20 @@ void do_item_relink(item *it, uint32_t hv) {
 
 int do_item_link(item *it, const uint32_t hv) {
     MEMCACHED_ITEM_LINK(ITEM_key(it), it->nkey, it->nbytes);
-    assert((it->it_flags & (ITEM_LINKED|ITEM_SLABBED)) == 0);
+    assert((atomic_load(&it->it_flags) & (ITEM_LINKED|ITEM_SLABBED)) == 0);
 #ifdef PSLAB
-    if (it->it_flags & ITEM_PSLAB) {
-        if ((it->it_flags & ITEM_CHUNKED) == 0)
+    if (atomic_load(&it->it_flags) & ITEM_PSLAB) {
+        if ((atomic_load(&it->it_flags) & ITEM_CHUNKED) == 0)
             pslab_item_data_flush(it);
         pmem_drain();
 
-        it->it_flags |= ITEM_LINKED;
+        atomic_store(&it->it_flags, atomic_load(&it->it_flags) | ITEM_LINKED);
         pmem_member_persist(it, it_flags);
         it->time = current_time;
         pmem_member_persist(it, time);
     } else {
 #endif
-        it->it_flags |= ITEM_LINKED;
+        atomic_store(&it->it_flags, atomic_load(&it->it_flags) | ITEM_LINKED);
         it->time = current_time;
 #ifdef PSLAB
     }
@@ -546,10 +546,10 @@ int do_item_link(item *it, const uint32_t hv) {
 
 void do_item_unlink(item *it, const uint32_t hv) {
     MEMCACHED_ITEM_UNLINK(ITEM_key(it), it->nkey, it->nbytes);
-    if ((it->it_flags & ITEM_LINKED) != 0) {
-        it->it_flags &= ~ITEM_LINKED;
+    if ((atomic_load(&it->it_flags) & ITEM_LINKED) != 0) {
+        atomic_store(&it->it_flags, atomic_load(&it->it_flags) & ~ITEM_LINKED);
 #ifdef PSLAB
-        if (it->it_flags & ITEM_PSLAB)
+        if (atomic_load(&it->it_flags) & ITEM_PSLAB)
             pmem_member_persist(it, it_flags);
 #endif
         STATS_LOCK();
@@ -566,10 +566,10 @@ void do_item_unlink(item *it, const uint32_t hv) {
 /* FIXME: Is it necessary to keep this copy/pasted code? */
 void do_item_unlink_nolock(item *it, const uint32_t hv) {
     MEMCACHED_ITEM_UNLINK(ITEM_key(it), it->nkey, it->nbytes);
-    if ((it->it_flags & ITEM_LINKED) != 0) {
+    if ((atomic_load(&it->it_flags) & ITEM_LINKED) != 0) {
         it->it_flags &= ~ITEM_LINKED;
 #ifdef PSLAB
-        if (it->it_flags & ITEM_PSLAB)
+        if (atomic_load(&it->it_flags) & ITEM_PSLAB)
             pmem_member_persist(it, it_flags);
 #endif
         STATS_LOCK();
@@ -585,7 +585,7 @@ void do_item_unlink_nolock(item *it, const uint32_t hv) {
 
 void do_item_remove(item *it) {
     MEMCACHED_ITEM_REMOVE(ITEM_key(it), it->nkey, it->nbytes);
-    assert((it->it_flags & ITEM_SLABBED) == 0);
+    assert((atomic_load(&it->it_flags) & ITEM_SLABBED) == 0);
     assert(it->refcount > 0);
 
     if (refcount_decr(it) == 0) {
@@ -598,13 +598,13 @@ void do_item_remove(item *it) {
 void do_item_update_nolock(item *it) {
     MEMCACHED_ITEM_UPDATE(ITEM_key(it), it->nkey, it->nbytes);
     if (it->time < current_time - ITEM_UPDATE_INTERVAL) {
-        assert((it->it_flags & ITEM_SLABBED) == 0);
+        assert((atomic_load(&it->it_flags) & ITEM_SLABBED) == 0);
 
-        if ((it->it_flags & ITEM_LINKED) != 0) {
+        if ((atomic_load(&it->it_flags) & ITEM_LINKED) != 0) {
             do_item_unlink_q(it);
             it->time = current_time;
 #ifdef PSLAB
-            if (it->it_flags & ITEM_PSLAB)
+            if (atomic_load(&it->it_flags) & ITEM_PSLAB)
                 pmem_member_persist(it, time);
 #endif
             do_item_link_q(it);
@@ -618,23 +618,23 @@ void do_item_update(item *it) {
 
     /* Hits to COLD_LRU immediately move to WARM. */
     if (settings.lru_segmented) {
-        assert((it->it_flags & ITEM_SLABBED) == 0);
-        if ((it->it_flags & ITEM_LINKED) != 0) {
-            if (ITEM_lruid(it) == COLD_LRU && (it->it_flags & ITEM_ACTIVE)) {
+        assert((atomic_load(&it->it_flags) & ITEM_SLABBED) == 0);
+        if ((atomic_load(&it->it_flags) & ITEM_LINKED) != 0) {
+            if (ITEM_lruid(it) == COLD_LRU && (atomic_load(&it->it_flags) & ITEM_ACTIVE)) {
                 it->time = current_time;
                 item_unlink_q(it);
                 it->slabs_clsid = ITEM_clsid(it);
                 it->slabs_clsid |= WARM_LRU;
-                it->it_flags &= ~ITEM_ACTIVE;
+                atomic_store(&it->it_flags, atomic_load(&it->it_flags) & ~ITEM_ACTIVE);
                 item_link_q_warm(it);
             } else if (it->time < current_time - ITEM_UPDATE_INTERVAL) {
                 it->time = current_time;
             }
         }
     } else if (it->time < current_time - ITEM_UPDATE_INTERVAL) {
-        assert((it->it_flags & ITEM_SLABBED) == 0);
+        assert((atomic_load(&it->it_flags) & ITEM_SLABBED) == 0);
 
-        if ((it->it_flags & ITEM_LINKED) != 0) {
+        if ((atomic_load(&it->it_flags) & ITEM_LINKED) != 0) {
             it->time = current_time;
             item_unlink_q(it);
             item_link_q(it);
@@ -645,7 +645,7 @@ void do_item_update(item *it) {
 int do_item_replace(item *it, item *new_it, const uint32_t hv) {
     MEMCACHED_ITEM_REPLACE(ITEM_key(it), it->nkey, it->nbytes,
                            ITEM_key(new_it), new_it->nkey, new_it->nbytes);
-    assert((it->it_flags & ITEM_SLABBED) == 0);
+    assert((atomic_load(&it->it_flags) & ITEM_SLABBED) == 0);
 
     do_item_unlink(it, hv);
     return do_item_link(new_it, hv);
@@ -1091,21 +1091,21 @@ item *do_item_get(const char *key, const size_t nkey, const uint32_t hv, conn *c
                  * FETCHED tells if an item has ever been active.
                  */
                 if (settings.lru_segmented) {
-                    if ((it->it_flags & ITEM_ACTIVE) == 0) {
-                        if ((it->it_flags & ITEM_FETCHED) == 0) {
-                            it->it_flags |= ITEM_FETCHED;
+                    if ((atomic_load(&it->it_flags) & ITEM_ACTIVE) == 0) {
+                        if ((atomic_load(&it->it_flags) & ITEM_FETCHED) == 0) {
+                            atomic_store(&it->it_flags, atomic_load(&it->it_flags) | ITEM_FETCHED);
                         } else {
-                            it->it_flags |= ITEM_ACTIVE;
+                            atomic_store(&it->it_flags, atomic_load(&it->it_flags) | ITEM_ACTIVE);
                             if (ITEM_lruid(it) != COLD_LRU) {
                                 do_item_update(it); // bump LA time
                             } else if (!lru_bump_async(c->thread->lru_bump_buf, it, hv)) {
                                 // add flag before async bump to avoid race.
-                                it->it_flags &= ~ITEM_ACTIVE;
+                                atomic_store(&it->it_flags, atomic_load(&it->it_flags) & ~ITEM_ACTIVE);
                             }
                         }
                     }
                 } else {
-                    it->it_flags |= ITEM_FETCHED;
+                    atomic_store(&it->it_flags, atomic_load(&it->it_flags) | ITEM_FETCHED);
                     do_item_update(it);
                 }
             }
@@ -1158,7 +1158,7 @@ int lru_pull_tail(const int orig_id, const int cur_lru,
     for (; tries > 0 && search != NULL; tries--, search=next_it) {
         /* we might relink search mid-loop, so search->prev isn't reliable */
         next_it = search->prev;
-        if (search->nbytes == 0 && search->nkey == 0 && search->it_flags == 1) {
+        if (search->nbytes == 0 && search->nkey == 0 && atomic_load(&search->it_flags) == 1) {
             /* We are a crawler, ignore it. */
             if (flags & LRU_PULL_CRAWL_BLOCKS) {
                 pthread_mutex_unlock(&lru_locks[id]);
@@ -1195,7 +1195,7 @@ int lru_pull_tail(const int orig_id, const int cur_lru,
         if ((search->exptime != 0 && search->exptime < current_time)
             || item_is_flushed(search)) {
             itemstats[id].reclaimed++;
-            if ((search->it_flags & ITEM_FETCHED) == 0) {
+            if ((atomic_load(&search->it_flags) & ITEM_FETCHED) == 0) {
                 itemstats[id].expired_unfetched++;
             }
             /* refcnt 2 -> 1 */
@@ -1220,8 +1220,8 @@ int lru_pull_tail(const int orig_id, const int cur_lru,
                 if (limit == 0)
                     limit = total_bytes * settings.warm_lru_pct / 100;
                 /* Rescue ACTIVE items aggressively */
-                if ((search->it_flags & ITEM_ACTIVE) != 0) {
-                    search->it_flags &= ~ITEM_ACTIVE;
+                if ((atomic_load(&search->it_flags) & ITEM_ACTIVE) != 0) {
+                    atomic_store(&search->it_flags, atomic_load(&search->it_flags) & ~ITEM_ACTIVE);
                     removed++;
                     if (cur_lru == WARM_LRU) {
                         itemstats[id].moves_within_lru++;
@@ -1259,10 +1259,10 @@ int lru_pull_tail(const int orig_id, const int cur_lru,
                     itemstats[id].evicted_time = current_time - search->time;
                     if (search->exptime != 0)
                         itemstats[id].evicted_nonzero++;
-                    if ((search->it_flags & ITEM_FETCHED) == 0) {
+                    if ((atomic_load(&search->it_flags) & ITEM_FETCHED) == 0) {
                         itemstats[id].evicted_unfetched++;
                     }
-                    if ((search->it_flags & ITEM_ACTIVE)) {
+                    if ((atomic_load(&search->it_flags) & ITEM_ACTIVE)) {
                         itemstats[id].evicted_active++;
                     }
                     LOGGER_LOG(NULL, LOG_EVICTIONS, LOGGER_EVICTION, search);
@@ -1276,10 +1276,10 @@ int lru_pull_tail(const int orig_id, const int cur_lru,
                     /* Keep a reference to this item and return it. */
                     ret_it->it = it;
                     ret_it->hv = hv;
-                } else if ((search->it_flags & ITEM_ACTIVE) != 0
+                } else if ((atomic_load(&search->it_flags) & ITEM_ACTIVE) != 0
                         && settings.lru_segmented) {
                     itemstats[id].moves_to_warm++;
-                    search->it_flags &= ~ITEM_ACTIVE;
+                    atomic_store(&search->it_flags, atomic_load(&search->it_flags) & ~ITEM_ACTIVE);
                     move_to_lru = WARM_LRU;
                     do_item_unlink_q(search);
                     removed++;
@@ -1793,7 +1793,7 @@ int init_lru_maintainer(void) {
 /* Tail linkers and crawler for the LRU crawler. */
 void do_item_linktail_q(item *it) { /* item is the new tail */
     item **head, **tail;
-    assert(it->it_flags == 1);
+    assert(atomic_load(&it->it_flags) == 1);
     assert(it->nbytes == 0);
 
     head = &heads[it->slabs_clsid];
@@ -1837,7 +1837,7 @@ void do_item_unlinktail_q(item *it) {
  * more clearly. */
 item *do_item_crawl_q(item *it) {
     item **head, **tail;
-    assert(it->it_flags == 1);
+    assert(atomic_load(&it->it_flags) == 1);
     assert(it->nbytes == 0);
     head = &heads[it->slabs_clsid];
     tail = &tails[it->slabs_clsid];
