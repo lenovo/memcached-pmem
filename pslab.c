@@ -22,7 +22,7 @@ typedef struct {
     char        version[PSLAB_POOL_VER_SIZE];
     uint8_t     reserved;
     uint8_t     checksum[2];
-    uint8_t     valid;  /* not checksumed */
+    atomic_uint_fast8_t     valid;  /* not checksumed */
 
     uint64_t    process_started;
     uint32_t    flush_time[2];
@@ -149,14 +149,14 @@ static void pslab_checksum_update(int sum, int i) {
 }
 
 void pslab_update_flushtime(uint32_t time) {
-    int i = (pslab_pool->valid - 1) ^ 1;
+    int i = (atomic_load(&pslab_pool->valid) - 1) ^ 1;
 
     pslab_pool->flush_time[i] = time;
     pslab_checksum_update(pslab_do_checksum(&time, sizeof (time)), i);
     pmem_member_flush(pslab_pool, flush_time);
     pmem_member_persist(pslab_pool, checksum);
 
-    pslab_pool->valid = i + 1;
+    atomic_store(&pslab_pool->valid, i + 1);
     pmem_member_persist(pslab_pool, valid);
 }
 
@@ -176,7 +176,7 @@ int pslab_do_recover() {
     uint8_t *ptr;
     int i, size, perslab;
 
-    settings.oldest_live = pslab_pool->flush_time[pslab_pool->valid - 1];
+    settings.oldest_live = pslab_pool->flush_time[atomic_load(&pslab_pool->valid) - 1];
 
     /* current_time will be resetted by clock_handler afterwards. Set
      * it temporarily, so that functions depending on it can be reused
@@ -288,7 +288,7 @@ int pslab_pre_recover(char *name, uint32_t *slab_sizes, int slab_max,
         return -1;
     }
     pslab_checksum_init();
-    if (pslab_checksum_check(pslab_pool->valid - 1)) {
+    if (pslab_checksum_check(atomic_load(&pslab_pool->valid) - 1)) {
         fprintf(stderr, "pslab pool bad checksum\n");
         return -1;
     }
@@ -365,7 +365,7 @@ int pslab_create(char *pool_name, uint32_t pool_size, uint32_t slab_page_size,
 
     pmem_persist(pslab_pool, pslab_pool->length);
 
-    pslab_pool->valid = 1;
+    atomic_store(&pslab_pool->valid, 1);
     pmem_member_persist(pslab_pool, valid);
 
     return 0;
