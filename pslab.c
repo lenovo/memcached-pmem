@@ -6,6 +6,7 @@
 #include "memcached.h"
 #include <stddef.h>
 #include <string.h>
+#include <stdatomic.h>
 
 #define PSLAB_POOL_SIG "PMCH"
 #define PSLAB_POOL_SIG_SIZE 4
@@ -37,7 +38,7 @@ typedef struct {
 #define PSLAB_CHUNK 4
 
 typedef struct {
-    uint8_t     id;
+    atomic_uint_fast8_t     id;
     uint8_t     flags;       /* non-persistent */
     uint8_t     reserved[6]; /* make slab[] 8 bytes aligned */
     uint32_t    size;
@@ -89,7 +90,7 @@ void pslab_use_slab(void *p, int id, unsigned int size) {
     pslab_t *fp = PSLAB_SLAB2FRAME(p);
     fp->size = size;
     pmem_member_persist(fp, size);
-    fp->id = id;
+    atomic_store(&fp->id, id);
     pmem_member_persist(fp, id);
 }
 
@@ -102,7 +103,7 @@ void *pslab_get_free_slab(void *slab) {
     else if (fp != cur)
         return NULL;
     PSLAB_WALK_FROM(fp, PSLAB_NEXT_FRAME(pslab_pool, cur)) {
-        if (fp->id == 0 || (fp->flags & (PSLAB_LINKED | PSLAB_CHUNK)) == 0) {
+        if (atomic_load(&fp->id) == 0 || (fp->flags & (PSLAB_LINKED | PSLAB_CHUNK)) == 0) {
             cur = fp;
             return fp->slab;
         }
@@ -188,7 +189,7 @@ int pslab_do_recover() {
 
     /* check for linked and chunked slabs and mark all chunks */
     PSLAB_WALK(fp) {
-        if (fp->id == 0)
+        if (atomic_load(&fp->id) == 0)
             continue;
         size = fp->size;
         perslab = pslab_pool->slab_page_size / size;
@@ -213,7 +214,7 @@ int pslab_do_recover() {
 
     /* relink alive chunks */
     PSLAB_WALK(fp) {
-        if (fp->id == 0 || (fp->flags & PSLAB_CHUNKED) == 0)
+        if (atomic_load(&fp->id) == 0 || (fp->flags & PSLAB_CHUNKED) == 0)
             continue;
 
         size = fp->size;
@@ -242,13 +243,13 @@ int pslab_do_recover() {
     PSLAB_WALK(fp) {
         int id;
 
-        if (fp->id == 0 || (fp->flags & (PSLAB_LINKED | PSLAB_CHUNK)) == 0)
+        if (atomic_load(&fp->id) == 0 || (fp->flags & (PSLAB_LINKED | PSLAB_CHUNK)) == 0)
             continue;
 
         if (do_slabs_renewslab(fp->id, (char *)fp->slab) == 0)
             return -1;
 
-        id = fp->id;
+        id = atomic_load(&fp->id);
         size = fp->size;
         perslab = pslab_pool->slab_page_size / size;
         for (i = 0, ptr = fp->slab; i < perslab; i++, ptr += size) {
