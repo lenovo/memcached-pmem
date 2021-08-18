@@ -28,7 +28,7 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <assert.h>
-
+#include <stdatomic.h>
 #include "itoa_ljust.h"
 #include "protocol_binary.h"
 #include "cache.h"
@@ -118,31 +118,31 @@
 
 /* warning: don't use these macros with a function, as it evals its arg twice */
 #define ITEM_get_cas(i) (((i)->it_flags & ITEM_CAS) ? \
-        (i)->data->cas : (uint64_t)0)
+        atomic_load(&(i)->data->cas) : (uint64_t)0)
 
 #define ITEM_set_cas(i,v) { \
-    if ((i)->it_flags & ITEM_CAS) { \
-        (i)->data->cas = v; \
+    if (atomic_load(&(i)->it_flags) & ITEM_CAS) { \
+        atomic_store(&(i)->data->cas, v); \
     } \
 }
 
 #define ITEM_key(item) (((char*)&((item)->data)) \
-         + (((item)->it_flags & ITEM_CAS) ? sizeof(uint64_t) : 0))
+         + (( atomic_load(&(item)->it_flags) & ITEM_CAS) ? sizeof(uint64_t) : 0))
 
 #define ITEM_suffix(item) ((char*) &((item)->data) + (item)->nkey + 1 \
-         + (((item)->it_flags & ITEM_CAS) ? sizeof(uint64_t) : 0))
+         + (( atomic_load(&(item)->it_flags) & ITEM_CAS) ? sizeof(uint64_t) : 0))
 
 #define ITEM_data(item) ((char*) &((item)->data) + (item)->nkey + 1 \
          + (item)->nsuffix \
-         + (((item)->it_flags & ITEM_CAS) ? sizeof(uint64_t) : 0))
+         + (( atomic_load(&(item)->it_flags) & ITEM_CAS) ? sizeof(uint64_t) : 0))
 
 #define ITEM_ntotal(item) (sizeof(struct _stritem) + (item)->nkey + 1 \
          + (item)->nsuffix + (item)->nbytes \
-         + (((item)->it_flags & ITEM_CAS) ? sizeof(uint64_t) : 0))
+         + ((atomic_load(&(item)->it_flags) & ITEM_CAS) ? sizeof(uint64_t) : 0))
 
 #ifdef PSLAB
 #define ITEM_dtotal(item) (item)->nkey + 1 + (item)->nsuffix + (item)->nbytes \
-         + (((item)->it_flags & ITEM_CAS) ? sizeof(uint64_t) : 0)
+         + (( atomic_load(&(item)->it_flags) & ITEM_CAS) ? sizeof(uint64_t) : 0)
 #endif
 
 #define ITEM_clsid(item) ((item)->slabs_clsid & ~(3<<6))
@@ -493,13 +493,13 @@ typedef struct _stritem {
     int             nbytes;     /* size of data */
     unsigned short  refcount;
     uint8_t         nsuffix;    /* length of flags-and-length string */
-    uint8_t         it_flags;   /* ITEM_* above */
+    atomic_uint_fast8_t         it_flags;   /* ITEM_* above */
     uint8_t         slabs_clsid;/* which slab class we're in */
     uint8_t         nkey;       /* key length, w/terminating null and padding */
     /* this odd type prevents type-punning issues when we do
      * the little shuffle to save space when not using CAS. */
     union {
-        uint64_t cas;
+        atomic_uint_fast64_t cas;
         char end;
     } data[];
     /* if it_flags & ITEM_CAS we have 8 bytes CAS */

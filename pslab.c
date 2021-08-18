@@ -6,6 +6,7 @@
 #include "memcached.h"
 #include <stddef.h>
 #include <string.h>
+#include <stdatomic.h>
 
 #define PSLAB_POOL_SIG "PMCH"
 #define PSLAB_POOL_SIG_SIZE 4
@@ -21,7 +22,7 @@ typedef struct {
     char        version[PSLAB_POOL_VER_SIZE];
     uint8_t     reserved;
     uint8_t     checksum[2];
-    uint8_t     valid;  /* not checksumed */
+    atomic_uint_fast8_t     valid;  /* not checksumed */
 
     uint64_t    process_started;
     uint32_t    flush_time[2];
@@ -37,7 +38,7 @@ typedef struct {
 #define PSLAB_CHUNK 4
 
 typedef struct {
-    uint8_t     id;
+    atomic_uint_fast8_t     id;
     uint8_t     flags;       /* non-persistent */
     uint8_t     reserved[6]; /* make slab[] 8 bytes aligned */
     uint32_t    size;
@@ -89,7 +90,7 @@ void pslab_use_slab(void *p, int id, unsigned int size) {
     pslab_t *fp = PSLAB_SLAB2FRAME(p);
     fp->size = size;
     pmem_member_persist(fp, size);
-    fp->id = id;
+    atomic_store(&fp->id, id);
     pmem_member_persist(fp, id);
 }
 
@@ -102,7 +103,7 @@ void *pslab_get_free_slab(void *slab) {
     else if (fp != cur)
         return NULL;
     PSLAB_WALK_FROM(fp, PSLAB_NEXT_FRAME(pslab_pool, cur)) {
-        if (fp->id == 0 || (fp->flags & (PSLAB_LINKED | PSLAB_CHUNK)) == 0) {
+        if (atomic_load(&fp->id) == 0 || (fp->flags & (PSLAB_LINKED | PSLAB_CHUNK)) == 0) {
             cur = fp;
             return fp->slab;
         }
@@ -148,14 +149,14 @@ static void pslab_checksum_update(int sum, int i) {
 }
 
 void pslab_update_flushtime(uint32_t time) {
-    int i = (pslab_pool->valid - 1) ^ 1;
+    int i = (atomic_load(&pslab_pool->valid) - 1) ^ 1;
 
     pslab_pool->flush_time[i] = time;
     pslab_checksum_update(pslab_do_checksum(&time, sizeof (time)), i);
     pmem_member_flush(pslab_pool, flush_time);
     pmem_member_persist(pslab_pool, checksum);
 
-    pslab_pool->valid = i + 1;
+    atomic_store(&pslab_pool->valid, i + 1);
     pmem_member_persist(pslab_pool, valid);
 }
 
@@ -175,7 +176,7 @@ int pslab_do_recover() {
     uint8_t *ptr;
     int i, size, perslab;
 
-    settings.oldest_live = pslab_pool->flush_time[pslab_pool->valid - 1];
+    settings.oldest_live = pslab_pool->flush_time[atomic_load(&pslab_pool->valid) - 1];
 
     /* current_time will be resetted by clock_handler afterwards. Set
      * it temporarily, so that functions depending on it can be reused
@@ -188,24 +189,24 @@ int pslab_do_recover() {
 
     /* check for linked and chunked slabs and mark all chunks */
     PSLAB_WALK(fp) {
-        if (fp->id == 0)
+        if (atomic_load(&fp->id) == 0)
             continue;
         size = fp->size;
         perslab = pslab_pool->slab_page_size / size;
         for (i = 0, ptr = fp->slab; i < perslab; i++, ptr += size) {
             item *it = (item *) ptr;
 
-            if (it->it_flags & ITEM_LINKED) {
+            if (atomic_load(&it->it_flags) & ITEM_LINKED) {
                 if (item_is_flushed(it) ||
                         (it->exptime != 0 && it->exptime <= current_time)) {
-                    it->it_flags = ITEM_PSLAB;
+                    atomic_store(&it->it_flags, ITEM_PSLAB);
                     pmem_member_persist(it, it_flags);
                 } else {
                     fp->flags |= PSLAB_LINKED;
-                    if (it->it_flags & ITEM_CHUNKED)
+                    if (atomic_load(&it->it_flags) & ITEM_CHUNKED)
                         fp->flags |= PSLAB_CHUNKED;
                 }
-            } else if (it->it_flags & ITEM_CHUNK) {
+            } else if (atomic_load(&it->it_flags) & ITEM_CHUNK) {
                 ((item_chunk *)it)->head = NULL; /* non-persistent */
             }
         }
@@ -213,7 +214,7 @@ int pslab_do_recover() {
 
     /* relink alive chunks */
     PSLAB_WALK(fp) {
-        if (fp->id == 0 || (fp->flags & PSLAB_CHUNKED) == 0)
+        if (atomic_load(&fp->id) == 0 || (fp->flags & PSLAB_CHUNKED) == 0)
             continue;
 
         size = fp->size;
@@ -221,7 +222,7 @@ int pslab_do_recover() {
         for (i = 0, ptr = fp->slab; i < perslab; i++, ptr += size) {
             item *it = (item *) ptr;
 
-            if ((it->it_flags & ITEM_LINKED) && (it->it_flags & ITEM_CHUNKED)) {
+            if ((atomic_load(&it->it_flags) & ITEM_LINKED) && (atomic_load(&it->it_flags) & ITEM_CHUNKED)) {
                 item_chunk *nch;
                 item_chunk *ch = (item_chunk *) ITEM_data(it);
                 ch->head = it;
@@ -242,23 +243,23 @@ int pslab_do_recover() {
     PSLAB_WALK(fp) {
         int id;
 
-        if (fp->id == 0 || (fp->flags & (PSLAB_LINKED | PSLAB_CHUNK)) == 0)
+        if (atomic_load(&fp->id) == 0 || (fp->flags & (PSLAB_LINKED | PSLAB_CHUNK)) == 0)
             continue;
 
         if (do_slabs_renewslab(fp->id, (char *)fp->slab) == 0)
             return -1;
 
-        id = fp->id;
+        id = atomic_load(&fp->id);
         size = fp->size;
         perslab = pslab_pool->slab_page_size / size;
         for (i = 0, ptr = fp->slab; i < perslab; i++, ptr += size) {
             item *it = (item *) ptr;
-            if (it->it_flags & ITEM_LINKED) {
+            if (atomic_load(&it->it_flags) & ITEM_LINKED) {
                 do_slab_realloc(it, id);
                 do_item_relink(it, hash(ITEM_key(it), it->nkey));
-            } else if ((it->it_flags & ITEM_CHUNK) == 0 ||
+            } else if ((atomic_load(&it->it_flags) & ITEM_CHUNK) == 0 ||
                     ((item_chunk *)it)->head == NULL) {
-                assert((it->it_flags & ITEM_CHUNKED) == 0);
+                assert((atomic_load(&it->it_flags) & ITEM_CHUNKED) == 0);
                 do_slabs_free(ptr, 0, id);
             }
         }
@@ -287,7 +288,7 @@ int pslab_pre_recover(char *name, uint32_t *slab_sizes, int slab_max,
         return -1;
     }
     pslab_checksum_init();
-    if (pslab_checksum_check(pslab_pool->valid - 1)) {
+    if (pslab_checksum_check(atomic_load(&pslab_pool->valid) - 1)) {
         fprintf(stderr, "pslab pool bad checksum\n");
         return -1;
     }
@@ -364,7 +365,7 @@ int pslab_create(char *pool_name, uint32_t pool_size, uint32_t slab_page_size,
 
     pmem_persist(pslab_pool, pslab_pool->length);
 
-    pslab_pool->valid = 1;
+    atomic_store(&pslab_pool->valid, 1);
     pmem_member_persist(pslab_pool, valid);
 
     return 0;
