@@ -117,8 +117,8 @@ static uint64_t lru_total_bumps_dropped(void);
 
 /* Get the next CAS id for a new item. */
 /* TODO: refactor some atomics for this. */
+static uint64_t cas_id = 0;
 uint64_t get_cas_id(void) {
-    static uint64_t cas_id = 0;
     pthread_mutex_lock(&cas_id_lock);
     uint64_t next_id = ++cas_id;
     pthread_mutex_unlock(&cas_id_lock);
@@ -499,7 +499,22 @@ void do_item_relink(item *it, uint32_t hv) {
     stats.total_items += 1;
     STATS_UNLOCK();
 
-    ITEM_set_cas(it, (settings.use_cas) ? get_cas_id() : 0);
+    /* Use the persistent CAS ID */
+    uint64_t cas = ITEM_get_cas(it);
+    if (cas && !settings.use_cas) {
+        /* Force use of CAS IDs if the persistent slab has CAS IDs */
+        settings.use_cas = true;
+        if (settings.verbose > 2)
+            fprintf(stderr, "FORCING settings.use_cas=yes due to persistent state\n");
+    }
+
+    if (settings.use_cas && cas) {
+        /* Update the current CAS ID for future items */
+        cas_id = cas_id < cas ? cas : cas_id;
+    } else if (settings.use_cas) {
+        /* Otherwise, allocate a new CAS ID for all */
+        ITEM_set_cas(it, get_cas_id());
+    }
     assoc_insert(it, hv);
     item_link_q(it);
     it->refcount = 1;
@@ -516,10 +531,17 @@ int do_item_link(item *it, const uint32_t hv) {
             pslab_item_data_flush(it);
         pmem_drain();
 
-        atomic_store(&it->it_flags, atomic_load(&it->it_flags) | ITEM_LINKED);
-        pmem_member_persist(it, it_flags);
+        /* Persist time to avoid false eviction on crash recovery */
         it->time = current_time;
         pmem_member_persist(it, time);
+
+        /* Allocate a new CAS ID before link so CAS ID is crash consistent */
+        ITEM_set_cas(it, (settings.use_cas) ? get_cas_id() : 0);
+        pmem_member_persist(it, data->cas);
+        
+        /* Link item last for atomicity */
+        atomic_store(&it->it_flags, atomic_load(&it->it_flags) | ITEM_LINKED);
+        pmem_member_persist(it, it_flags);
     } else {
 #endif
         atomic_store(&it->it_flags, atomic_load(&it->it_flags) | ITEM_LINKED);
@@ -534,8 +556,10 @@ int do_item_link(item *it, const uint32_t hv) {
     stats.total_items += 1;
     STATS_UNLOCK();
 
+#ifndef PSLAB
     /* Allocate a new CAS ID on link. */
     ITEM_set_cas(it, (settings.use_cas) ? get_cas_id() : 0);
+#endif
     assoc_insert(it, hv);
     item_link_q(it);
     refcount_incr(it);
