@@ -516,10 +516,15 @@ int do_item_link(item *it, const uint32_t hv) {
             pslab_item_data_flush(it);
         pmem_drain();
 
-        atomic_store(&it->it_flags, atomic_load(&it->it_flags) | ITEM_LINKED);
-        pmem_member_persist(it, it_flags);
+        /* Persist time to avoid false eviction on crash recovery */
         it->time = current_time;
         pmem_member_persist(it, time);
+
+        /* Allocate a new CAS ID before link so CAS ID is crash consistent */
+        ITEM_set_cas(it, (settings.use_cas) ? get_cas_id() : 0);
+        /* Atomic odification to same flags field should happen sequentially */
+        atomic_store(&it->it_flags, atomic_load(&it->it_flags) | ITEM_LINKED);
+        pmem_member_persist(it, it_flags);
     } else {
 #endif
         atomic_store(&it->it_flags, atomic_load(&it->it_flags) | ITEM_LINKED);
@@ -534,8 +539,10 @@ int do_item_link(item *it, const uint32_t hv) {
     stats.total_items += 1;
     STATS_UNLOCK();
 
+#ifndef PSLAB
     /* Allocate a new CAS ID on link. */
     ITEM_set_cas(it, (settings.use_cas) ? get_cas_id() : 0);
+#endif
     assoc_insert(it, hv);
     item_link_q(it);
     refcount_incr(it);
