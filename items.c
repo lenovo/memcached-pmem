@@ -537,7 +537,9 @@ int do_item_link(item *it, const uint32_t hv) {
 
         /* Allocate a new CAS ID before link so CAS ID is crash consistent */
         ITEM_set_cas(it, (settings.use_cas) ? get_cas_id() : 0);
-        /* Atomic modification to same flags field happen sequentially */
+        pmem_member_persist(it, data->cas);
+        
+        /* Link item last for atomicity */
         atomic_store(&it->it_flags, atomic_load(&it->it_flags) | ITEM_LINKED);
         pmem_member_persist(it, it_flags);
     } else {
