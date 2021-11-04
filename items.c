@@ -117,8 +117,8 @@ static uint64_t lru_total_bumps_dropped(void);
 
 /* Get the next CAS id for a new item. */
 /* TODO: refactor some atomics for this. */
+static uint64_t cas_id = 0;
 uint64_t get_cas_id(void) {
-    static uint64_t cas_id = 0;
     pthread_mutex_lock(&cas_id_lock);
     uint64_t next_id = ++cas_id;
     pthread_mutex_unlock(&cas_id_lock);
@@ -499,7 +499,22 @@ void do_item_relink(item *it, uint32_t hv) {
     stats.total_items += 1;
     STATS_UNLOCK();
 
-    ITEM_set_cas(it, (settings.use_cas) ? get_cas_id() : 0);
+    /* Use the persistent CAS ID */
+    uint64_t cas = ITEM_get_cas(it);
+    if (cas && !settings.use_cas) {
+        /* Force use of CAS IDs if the persistent slab has CAS IDs */
+        settings.use_cas = true;
+        if (settings.verbose > 2)
+            fprintf(stderr, "FORCING settings.use_cas=yes due to persistent state\n");
+    }
+
+    if (settings.use_cas && cas) {
+        /* Update the current CAS ID for future items */
+        cas_id = cas_id < cas ? cas : cas_id;
+    } else if (settings.use_cas) {
+        /* Otherwise, allocate a new CAS ID for all */
+        ITEM_set_cas(it, get_cas_id());
+    }
     assoc_insert(it, hv);
     item_link_q(it);
     it->refcount = 1;
